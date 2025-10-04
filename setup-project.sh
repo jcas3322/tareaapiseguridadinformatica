@@ -83,7 +83,8 @@ PORT=3000
 HOST=localhost
 
 # Base de datos (configura según tu setup)
-DATABASE_URL=postgresql://username:password@localhost:5432/spotify_api
+# Usa variables; no incrustes credenciales en la URL
+DATABASE_URL=postgresql://{{DB_USER}}:{{DB_PASSWORD}}@localhost:5432/spotify_api
 
 # Seguridad
 JWT_SECRET=your-super-secret-jwt-key-minimum-32-characters-long

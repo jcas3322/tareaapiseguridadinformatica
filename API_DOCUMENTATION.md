@@ -165,7 +165,8 @@ curl -X POST http://localhost:3000/api/songs \
 ```env
 NODE_ENV=development
 PORT=3000
-DATABASE_URL=postgresql://user:password@localhost:5432/spotify_api
+# Usa variables; evita incrustar usuario:contraseña en la URL
+DATABASE_URL=postgresql://{{DB_USER}}:{{DB_PASSWORD}}@localhost:5432/spotify_api
 JWT_SECRET=tu-secreto-jwt-muy-seguro
 JWT_EXPIRES_IN=1h
 JWT_REFRESH_EXPIRES_IN=7d
