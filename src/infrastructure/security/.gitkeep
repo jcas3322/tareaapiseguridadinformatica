@@ -1,0 +1,2 @@
+# Security Infrastructure
+This directory contains security implementations like JWT, hashing, and validation.

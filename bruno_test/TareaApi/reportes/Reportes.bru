@@ -1,0 +1,15 @@
+meta {
+  name: Reportes
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{host}}/api/security/csp-report
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}

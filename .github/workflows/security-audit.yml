@@ -1,0 +1,375 @@
+# GitHub Actions Workflow for Security Auditing
+# Runs comprehensive security checks on every push and pull request
+
+name: Security Audit
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      fail_on_high:
+        description: 'Fail on high severity issues'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  dependency-audit:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run npm audit
+      run: |
+        npm audit --audit-level=moderate --json > npm-audit-results.json || true
+        npm audit --audit-level=moderate
+      continue-on-error: true
+      
+    - name: Run custom NPM security check
+      run: |
+        chmod +x scripts/npm-security-check.js
+        node scripts/npm-security-check.js
+      continue-on-error: true
+      
+    - name: Upload npm audit results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: npm-audit-results
+        path: |
+          npm-audit-results.json
+          security-audit-npm/
+        retention-days: 30
+
+  code-security-scan:
+    name: Code Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run ESLint security scan
+      run: |
+        npx eslint . --ext .ts,.js --format json --output-file eslint-security-results.json || true
+        npx eslint . --ext .ts,.js
+      continue-on-error: true
+      
+    - name: Run TypeScript compiler check
+      run: |
+        npx tsc --noEmit --pretty false > tsc-results.txt 2>&1 || true
+        cat tsc-results.txt
+      continue-on-error: true
+      
+    - name: Scan for hardcoded secrets
+      run: |
+        echo "Scanning for hardcoded secrets..."
+        
+        # Create secrets scan results file
+        echo "Hardcoded Secrets Scan Results" > secrets-scan-results.txt
+        echo "===============================" >> secrets-scan-results.txt
+        echo "" >> secrets-scan-results.txt
+        
+        # Define patterns to search for
+        patterns=(
+          "password\s*=\s*['\"][^'\"]{8,}"
+          "secret\s*=\s*['\"][^'\"]{16,}"
+          "token\s*=\s*['\"][^'\"]{20,}"
+          "api[_-]?key\s*=\s*['\"][^'\"]{16,}"
+          "private[_-]?key\s*=\s*['\"]"
+          "-----BEGIN.*PRIVATE.*KEY-----"
+          "sk_live_[a-zA-Z0-9]+"
+          "pk_live_[a-zA-Z0-9]+"
+          "AKIA[0-9A-Z]{16}"
+          "AIza[0-9A-Za-z\\-_]{35}"
+        )
+        
+        secrets_found=0
+        
+        for pattern in "${patterns[@]}"; do
+          echo "Checking pattern: $pattern" >> secrets-scan-results.txt
+          matches=$(grep -r -E -n "$pattern" src/ config/ 2>/dev/null | wc -l || echo "0")
+          if [[ $matches -gt 0 ]]; then
+            echo "  Found $matches matches:" >> secrets-scan-results.txt
+            grep -r -E -n "$pattern" src/ config/ >> secrets-scan-results.txt 2>/dev/null || true
+            secrets_found=$((secrets_found + matches))
+          else
+            echo "  No matches found" >> secrets-scan-results.txt
+          fi
+          echo "" >> secrets-scan-results.txt
+        done
+        
+        echo "Total potential secrets found: $secrets_found" >> secrets-scan-results.txt
+        
+        if [[ $secrets_found -gt 0 ]]; then
+          echo "::error::Found $secrets_found potential hardcoded secrets!"
+          cat secrets-scan-results.txt
+          exit 1
+        else
+          echo "::notice::No hardcoded secrets found"
+        fi
+      
+    - name: Upload code scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: code-security-scan-results
+        path: |
+          eslint-security-results.json
+          tsc-results.txt
+          secrets-scan-results.txt
+        retention-days: 30
+
+  configuration-audit:
+    name: Configuration Security Audit
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Audit Docker configuration
+      run: |
+        echo "Docker Security Audit Results" > docker-audit-results.txt
+        echo "=============================" >> docker-audit-results.txt
+        echo "" >> docker-audit-results.txt
+        
+        if [[ -f "Dockerfile" ]]; then
+          echo "Checking Dockerfile..." >> docker-audit-results.txt
+          
+          # Check if running as root
+          if ! grep -q "USER.*[^root]" Dockerfile; then
+            echo "❌ Container may run as root" >> docker-audit-results.txt
+          else
+            echo "✅ Non-root user configured" >> docker-audit-results.txt
+          fi
+          
+          # Check for COPY --chown
+          if grep -q "COPY.*--chown" Dockerfile; then
+            echo "✅ Proper file ownership in COPY commands" >> docker-audit-results.txt
+          else
+            echo "⚠️  Consider using --chown in COPY commands" >> docker-audit-results.txt
+          fi
+          
+          # Check for health checks
+          if grep -q "HEALTHCHECK" Dockerfile; then
+            echo "✅ Health check configured" >> docker-audit-results.txt
+          else
+            echo "⚠️  No health check configured" >> docker-audit-results.txt
+          fi
+          
+          # Check for secrets in Dockerfile
+          if grep -E -i "(password|secret|token|key)" Dockerfile; then
+            echo "❌ Potential secrets found in Dockerfile" >> docker-audit-results.txt
+          else
+            echo "✅ No secrets found in Dockerfile" >> docker-audit-results.txt
+          fi
+        else
+          echo "No Dockerfile found" >> docker-audit-results.txt
+        fi
+        
+        cat docker-audit-results.txt
+      
+    - name: Audit environment configuration
+      run: |
+        echo "Environment Configuration Audit" > env-audit-results.txt
+        echo "===============================" >> env-audit-results.txt
+        echo "" >> env-audit-results.txt
+        
+        env_files=(".env.example" "config/environments/development.env" "config/environments/staging.env" "config/environments/production.env")
+        
+        for env_file in "${env_files[@]}"; do
+          if [[ -f "$env_file" ]]; then
+            echo "Checking $env_file:" >> env-audit-results.txt
+            
+            # Check for weak secrets
+            if grep -q "secret.*=.*dev\|secret.*=.*test\|secret.*=.*123\|secret.*=.*password" "$env_file" 2>/dev/null; then
+              echo "  ❌ Weak secrets found" >> env-audit-results.txt
+            else
+              echo "  ✅ No weak secrets" >> env-audit-results.txt
+            fi
+            
+            # Check for default passwords
+            if grep -q "password.*=.*admin\|password.*=.*123\|password.*=.*password" "$env_file" 2>/dev/null; then
+              echo "  ❌ Default passwords found" >> env-audit-results.txt
+            else
+              echo "  ✅ No default passwords" >> env-audit-results.txt
+            fi
+            
+            # Check SSL/TLS settings
+            if grep -q "SSL.*=.*false\|TLS.*=.*false" "$env_file" 2>/dev/null; then
+              if [[ "$env_file" != *"development"* ]]; then
+                echo "  ❌ SSL/TLS disabled in non-dev environment" >> env-audit-results.txt
+              else
+                echo "  ⚠️  SSL/TLS disabled (development)" >> env-audit-results.txt
+              fi
+            else
+              echo "  ✅ SSL/TLS properly configured" >> env-audit-results.txt
+            fi
+            
+            echo "" >> env-audit-results.txt
+          fi
+        done
+        
+        cat env-audit-results.txt
+      
+    - name: Upload configuration audit results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: configuration-audit-results
+        path: |
+          docker-audit-results.txt
+          env-audit-results.txt
+        retention-days: 30
+
+  comprehensive-security-audit:
+    name: Comprehensive Security Audit
+    runs-on: ubuntu-latest
+    needs: [dependency-audit, code-security-scan, configuration-audit]
+    if: always()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Make security audit script executable
+      run: chmod +x scripts/security-audit.sh
+      
+    - name: Run comprehensive security audit
+      run: |
+        if [[ "${{ github.event.inputs.fail_on_high }}" == "true" ]]; then
+          ./scripts/security-audit.sh --fail-on-high
+        else
+          ./scripts/security-audit.sh
+        fi
+      continue-on-error: true
+      
+    - name: Upload comprehensive audit results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: comprehensive-security-audit
+        path: security-audit-*/
+        retention-days: 30
+        
+    - name: Comment PR with security summary
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          // Find the latest audit directory
+          const auditDirs = fs.readdirSync('.').filter(dir => dir.startsWith('security-audit-'));
+          if (auditDirs.length === 0) return;
+          
+          const latestAuditDir = auditDirs.sort().pop();
+          const reportFile = path.join(latestAuditDir, 'security-audit-report.json');
+          
+          if (!fs.existsSync(reportFile)) return;
+          
+          const report = JSON.parse(fs.readFileSync(reportFile, 'utf8'));
+          const summary = report.results.summary;
+          
+          const comment = `## 🔒 Security Audit Summary
+          
+          | Metric | Count |
+          |--------|-------|
+          | Total Issues | ${summary.total_issues} |
+          | Critical | ${summary.critical_issues} |
+          | High | ${summary.high_issues} |
+          | Medium | ${summary.medium_issues} |
+          | Low | ${summary.low_issues} |
+          
+          ${summary.critical_issues > 0 ? '🚨 **Critical issues found!** Please address immediately.' : ''}
+          ${summary.high_issues > 0 ? '⚠️ **High severity issues found.** Please review and fix.' : ''}
+          ${summary.total_issues === 0 ? '✅ **No security issues found!** Great job!' : ''}
+          
+          View detailed results in the [workflow artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  security-scorecard:
+    name: Security Scorecard
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Scorecard analysis
+      uses: ossf/scorecard-action@v2.3.1
+      with:
+        results_file: results.sarif
+        results_format: sarif
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_results: true
+        
+    - name: Upload SARIF results
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: results.sarif
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Dependency Review
+      uses: actions/dependency-review-action@v4
+      with:
+        fail-on-severity: moderate
+        allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC
+        deny-licenses: GPL-2.0, GPL-3.0, AGPL-1.0, AGPL-3.0
